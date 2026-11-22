@@ -114,6 +114,18 @@ class CockpitServer:
                     ))
                     return
 
+                if path == "/api/train/series":
+                    qs = parse_qs(parsed.query)
+                    symbol = (qs.get("symbol") or [""])[0]
+                    self._json(outer.sup.train_series(symbol))
+                    return
+
+                if path == "/api/train/formula":
+                    qs = parse_qs(parsed.query)
+                    symbol = (qs.get("symbol") or [""])[0]
+                    self._json(outer.sup.train_formula(symbol))
+                    return
+
                 if path == "/api/log":
                     qs = parse_qs(parsed.query)
                     key = (qs.get("key") or ["web"])[0]

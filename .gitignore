@@ -131,7 +131,8 @@ ark_rotation_state.json
 build/
 dist/
 *.spec
-AlphaMaster.exe
+# 打包产物；AlphaMaster.prev.exe 是 exe 正在运行时被替换留下的旧版
+AlphaMaster*.exe
 
 # 首次运行自动生成的路径配置（含本机绝对路径）
 cockpit.json

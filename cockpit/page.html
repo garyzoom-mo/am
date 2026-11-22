@@ -118,6 +118,26 @@ pre.log{
 }
 pre.log.tall{height:calc(100vh - 260px)}
 pre.log.mid{height:300px}
+pre.log.short{height:210px}
+
+/* ── 训练曲线 ── */
+.curve-head{display:flex;align-items:center;gap:14px;margin:10px 0 6px;font-size:11.5px;color:var(--dim)}
+.curve-legend{display:flex;align-items:center;gap:5px}
+.curve-legend .sw{width:9px;height:9px;border-radius:2px;display:inline-block;flex:0 0 auto}
+.curve-legend .sw.best{background:#34f5c8}
+.curve-legend .sw.val{background:#58a6ff}
+.curve-box{position:relative;background:#080b10;border:1px solid var(--line);border-radius:8px;height:172px;overflow:hidden}
+.curve-box canvas{display:block;width:100%;height:100%}
+.curve-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--dim2);font-size:12px;text-align:center;padding:0 20px;line-height:1.6}
+.curve-tip{position:absolute;pointer-events:none;background:#22272e;border:1px solid var(--line);
+  border-radius:6px;padding:4px 8px;font:11px/1.5 var(--mono);color:var(--text);white-space:nowrap;
+  opacity:0;transition:opacity .12s;z-index:2}
+.formula{display:flex;gap:8px;align-items:baseline;margin:8px 0 10px;font-size:11.5px;min-height:17px}
+.formula .lb{color:var(--dim);flex:0 0 auto}
+.formula code{font-family:var(--mono);font-size:11px;color:#c9d1d9;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;flex:1;cursor:default}
+.formula code.dim{color:var(--dim2)}
 
 .empty{color:var(--dim2);font-size:12px;padding:10px 2px}
 .errbox{
@@ -203,7 +223,21 @@ pre.log.mid{height:300px}
         <h3>当前任务</h3>
         <div id="trainNow" class="empty">没有正在运行的训练</div>
         <div class="bar"><i id="trainBar"></i></div>
-        <pre class="log mid" id="trainLog">等待训练…</pre>
+        <div class="curve-head">
+          <span class="curve-legend"><i class="sw best"></i>最优分数</span>
+          <span class="curve-legend"><i class="sw val"></i>验证分数</span>
+          <span style="flex:1"></span>
+          <span class="hint" id="curveMeta">–</span>
+        </div>
+        <div class="curve-box" id="curveBox">
+          <canvas id="curve"></canvas>
+          <div class="curve-empty" id="curveEmpty">还没有训练记录</div>
+          <div class="curve-tip" id="curveTip"></div>
+        </div>
+        <div class="formula">
+          <span class="lb">最优公式</span><code id="formulaText" class="dim">–</code>
+        </div>
+        <pre class="log short" id="trainLog">等待训练…</pre>
       </div>
     </div>
   </section>
@@ -269,6 +303,13 @@ function dur(s){
   if(m) return `${m}m${String(x).padStart(2,'0')}s`;
   return x+'s';
 }
+function agoShort(s){
+  if(s==null) return '–';
+  if(s < 60) return Math.round(s)+' 秒前';
+  if(s < 3600) return Math.round(s/60)+' 分钟前';
+  if(s < 86400) return (s/3600).toFixed(1)+' 小时前';
+  return Math.round(s/86400)+' 天前';
+}
 function esc(s){ return String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 async function api(path, body){
@@ -287,7 +328,7 @@ document.querySelectorAll('.tab').forEach(b=>{
     document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on', x===b));
     document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id==='tab-'+TAB));
     if(TAB==='log') loadLog(true);
-    if(TAB==='train') loadTrainLog();
+    if(TAB==='train'){ loadTrainLog(); setTimeout(drawCurve, 20); }  // 隐藏时量不到宽高
     if(TAB==='live') loadLiveLog();
   };
 });
@@ -463,6 +504,283 @@ async function loadPlan(){
   }
 }
 
+/* ── 训练曲线与最优公式 ── */
+let CURVE_DATA = null, SERIES_PENDING = {}, SERIES_AT = {};
+let FORMULA = {}, FORMULA_KEY = '', FORMULA_AT = 0, FORMULA_PENDING = {};
+let SPEED = {step:null, t:0, value:null};
+let SEL_MANUAL = false;   // 用户是否手动选过数据文件
+let VIZ_SYM = '';         // 界面当前展示的是哪个品种（曲线说了算）
+
+/* 当前该看哪个品种的曲线：
+   1. 本窗口正在跑的训练 —— 强制跟随，不能一边练一边看别的
+   2. 用户手动选的数据文件 —— 他想看谁就看谁
+   3. 别处跑着的训练
+   4. 都没指定 → 交给后端挑最近写入的那份，避免一进来就盯着几小时前的旧曲线 */
+function currentSymbol(tj){
+  if(tj && tj.running && tj.symbol) return String(tj.symbol).toUpperCase();
+  if(SEL_MANUAL){
+    const df = $('#dataFile').value || '';
+    const m = df.split(/[\\/]/).pop().match(/^(.+?)_(?:M\d+|H\d+|D\d+)\.parquet$/i);
+    if(m) return m[1].toUpperCase();
+  }
+  if(tj && tj.symbol) return String(tj.symbol).toUpperCase();
+  return '';
+}
+
+async function loadSeries(sym){
+  const key = sym || '__latest__';
+  if(SERIES_PENDING[key]) return;
+  SERIES_PENDING[key] = true;
+  try{
+    const d = await api('/api/train/series?symbol=' + encodeURIComponent(sym || ''));
+    SERIES_AT[key] = Date.now();
+    if(currentSymbol((STATE && STATE.train_job) || {}) !== sym) return;  // 已经切走了
+    CURVE_DATA = d;
+    if(d.ok && d.symbol) VIZ_SYM = String(d.symbol).toUpperCase();
+    drawCurve();
+    const meta = $('#curveMeta');
+    if(!d.ok) meta.textContent = d.error || '–';
+    else if(d.updated_sec != null && d.updated_sec < 30) meta.textContent = `${d.symbol} · ${d.points} 点 · 正在写`;
+    else meta.textContent = `${d.symbol} · ${d.points} 点 · 上次写入 ${agoShort(d.updated_sec)}`;
+    renderTrainNow((STATE && STATE.train_job) || {});   // 最优分数可能只有历史文件里才有
+    // 没指定品种（自动挑的最近一份）时，公式也按挑中的品种取
+    if(d.ok && d.symbol && !sym) loadFormula(VIZ_SYM);
+  }catch(e){
+  }finally{
+    delete SERIES_PENDING[key];
+  }
+}
+
+/* 公式要从检查点里读，torch 不在控制台进程里，一次 2~4 秒，按品种缓存；
+   检查点二十来步才写一次，所以 40 秒内不重复问。 */
+async function loadFormula(sym){
+  if(!sym || FORMULA_PENDING[sym]) return;
+  const fresh = FORMULA[sym] && FORMULA_KEY === sym && (Date.now() - FORMULA_AT) < 40000;
+  if(fresh) return;
+  FORMULA_PENDING[sym] = true;
+  if(!(FORMULA[sym] && FORMULA[sym].ok)){
+    const el = $('#formulaText');
+    el.classList.add('dim'); el.textContent = '读取中…'; el.title = '';
+  }
+  try{
+    const r = await api('/api/train/formula?symbol=' + encodeURIComponent(sym));
+    FORMULA[sym] = r; FORMULA_KEY = sym; FORMULA_AT = Date.now();
+    if(!VIZ_SYM || VIZ_SYM === sym) paintFormula(r);
+  }catch(e){
+    if(!VIZ_SYM || VIZ_SYM === sym){
+      const el = $('#formulaText'); el.classList.add('dim');
+      el.textContent = '读取失败：' + e.message; el.title = '';
+    }
+  }finally{
+    delete FORMULA_PENDING[sym];
+  }
+}
+
+function paintFormula(r){
+  const el = $('#formulaText');
+  if(r && r.ok && r.decoded){
+    el.classList.remove('dim');
+    el.textContent = r.decoded;
+    el.title = `${r.decoded}\n来源 ${r.source === 'ckpt' ? '检查点' : '策略文件'}`
+      + ` · 第 ${r.step ?? '?'} 步 · 分数 ${fmt(r.score,4)}`;
+  }else{
+    el.classList.add('dim');
+    el.textContent = (r && r.error) || '–';
+    el.title = '';
+  }
+}
+
+function syncTrainViz(tj){
+  const sym = currentSymbol(tj);
+  if(sym){
+    VIZ_SYM = sym;
+    loadFormula(sym);
+  }
+  loadSeries(sym);   // 没指定品种时传空串，让后端挑最近写入的那份
+}
+
+/* 手绘折线：不引 Chart.js/CDN —— exe 是离线的，外链一挂就白屏。
+   最优分数是台阶曲线（只往上抬），验证分数是每步均值（上下抖）。 */
+function drawCurve(){
+  const box = $('#curveBox'), cv = $('#curve'), empty = $('#curveEmpty');
+  if(!box || !cv) return;
+  const W = box.clientWidth, H = box.clientHeight;
+  if(!W || !H) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const d = CURVE_DATA;
+  const best = (d && d.ok && d.best) || [];
+  if(!best.length){
+    empty.style.display = 'flex';
+    empty.textContent = (d && d.error) ? d.error : '还没有训练记录（第一步约需 15～30 秒）';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const vals = best.concat((d.val || []).filter(v => v != null));
+  let lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  if(!isFinite(lo) || !isFinite(hi)) return;
+  if(hi - lo < 1e-9){ hi += 0.1; lo -= 0.1; }
+  const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+
+  const L = 46, R = 10, T = 12, B = 18, w = W - L - R, h = H - T - B;
+  const n = best.length;
+  const X = i => L + (n <= 1 ? w / 2 : i / (n - 1) * w);
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * h;
+
+  g.font = '10px "JetBrains Mono",Consolas,monospace';
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  for(let k = 0; k <= 3; k++){
+    const v = lo + (hi - lo) * k / 3, y = Y(v);
+    g.strokeStyle = 'rgba(120,190,235,0.07)';
+    g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke();
+    g.fillStyle = '#6b7684'; g.fillText(v.toFixed(2), L - 6, y);
+  }
+
+  const line = (arr, color, fill) => {
+    const pts = [];
+    for(let i = 0; i < arr.length; i++){
+      const v = arr[i];
+      if(v == null) continue;
+      pts.push([X(i), Y(v), i]);
+    }
+    if(!pts.length) return null;
+    if(fill){
+      g.beginPath(); g.moveTo(pts[0][0], T + h);
+      pts.forEach(p => g.lineTo(p[0], p[1]));
+      g.lineTo(pts[pts.length - 1][0], T + h); g.closePath();
+      const grad = g.createLinearGradient(0, T, 0, T + h);
+      grad.addColorStop(0, fill); grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad; g.fill();
+    }
+    g.beginPath();
+    let prev = null;
+    pts.forEach(p => {
+      if(prev !== null && p[2] === prev + 1) g.lineTo(p[0], p[1]);
+      else g.moveTo(p[0], p[1]);
+      prev = p[2];
+    });
+    g.strokeStyle = color; g.lineWidth = 1.6; g.lineJoin = 'round'; g.stroke();
+    return pts;
+  };
+  line(d.val || [], '#58a6ff', 'rgba(88,166,255,0.16)');
+  const bp = line(best, '#34f5c8', 'rgba(52,245,200,0.16)');
+  if(bp && bp.length){
+    const p = bp[bp.length - 1];
+    g.beginPath(); g.arc(p[0], p[1], 3, 0, Math.PI * 2);
+    g.fillStyle = '#34f5c8'; g.fill();
+  }
+
+  g.fillStyle = '#6b7684'; g.textBaseline = 'top';
+  g.textAlign = 'left'; g.fillText('第 ' + (d.step_first ?? 0) + ' 步', L, T + h + 4);
+  g.textAlign = 'right';
+  g.fillText('第 ' + (d.step_last ?? 0) + ' 步', W - R, T + h + 4);
+}
+
+/* 鼠标移到曲线上看具体某一步的分数 */
+function bindCurveHover(){
+  const box = $('#curveBox'), cv = $('#curve'), tip = $('#curveTip');
+  if(!cv) return;
+  cv.addEventListener('mousemove', ev => {
+    const d = CURVE_DATA;
+    if(!d || !d.ok || !d.best || !d.best.length){ tip.style.opacity = 0; return; }
+    const rect = cv.getBoundingClientRect();
+    const L = 46, R = 10, w = rect.width - L - R;
+    let i = Math.round((ev.clientX - rect.left - L) / (w || 1) * (d.best.length - 1));
+    i = Math.max(0, Math.min(d.best.length - 1, i));
+    const b = d.best[i], v = (d.val || [])[i], st = (d.step || [])[i];
+    tip.innerHTML = `第 ${st ?? '?'} 步<br>最优 <b style="color:#34f5c8">${fmt(b,4)}</b>`
+      + (v != null ? `<br>验证 <b style="color:#58a6ff">${fmt(v,4)}</b>` : '');
+    tip.style.opacity = 1;
+    const tw = tip.offsetWidth;
+    const x = L + (d.best.length <= 1 ? w / 2 : i / (d.best.length - 1) * w);
+    tip.style.left = Math.max(4, Math.min(rect.width - tw - 4, x - tw / 2)) + 'px';
+    tip.style.top = '6px';
+  });
+  cv.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
+}
+
+/* 只画「当前任务」那块（曲线加载完要补一次最优分数，所以单独拆出来） */
+function renderTrainNow(tj){
+  tj = tj || {};
+  $('#btnTrain').disabled = !!tj.running || STARTING;
+  $('#btnTrainStop').disabled = !tj.running;
+
+  if(tj.external){
+    $('#trainBar').style.width = '0';
+    const s = CURVE_DATA && CURVE_DATA.ok ? CURVE_DATA : null;
+    const sameSym = !!(s && s.symbol && tj.symbol
+      && s.symbol.toUpperCase() === String(tj.symbol).toUpperCase());
+    $('#trainNow').innerHTML = `<div class="rows">
+      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
+      <span class="k">进度</span><span class="v">第 ${tj.step??'?'} 步</span>
+      <span class="k">最优分数</span><span class="v">${fmt(tj.best ?? (sameSym ? s.best_score : null),4)}</span>
+      <span class="k">验证分数</span><span class="v">${sameSym ? fmt(s.val_score,4) : '–'}</span>
+      <span class="k">状态</span><span class="v" style="color:var(--warn)">外部训练</span>
+    </div>
+    <div class="hint" style="margin-top:8px">${esc(tj.external_reason||'这个训练不是本控制台启动的')}，无法在此停止。要接管请先停掉原进程。</div>`
+    + (s && s.symbol && !sameSym
+        ? `<div class="hint" style="margin-top:4px">曲线显示的是 ${esc(s.symbol)}（你在左侧选的文件）。</div>`
+        : '');
+    return;
+  }
+  if(!tj.running){
+    const s = CURVE_DATA && CURVE_DATA.ok ? CURVE_DATA : null;
+    let html = '';
+    if(tj.last_error){
+      html += `<div class="errbox"><div class="t">上次未能开始训练</div>${esc(tj.last_error)}</div>`;
+    }else if(tj.last_exit === 0 && tj.last_exit_age != null && tj.last_exit_age < 1800){
+      html += `<div class="hint" style="margin-bottom:6px">上次训练已正常结束（退出码 0）</div>`;
+    }
+    const msg = s
+      ? `没有正在运行的训练（下面是 ${esc(s.symbol)} 上一轮的曲线，共 ${s.points} 点）`
+      : '没有正在运行的训练';
+    $('#trainNow').innerHTML = html + `<span class="dimv">${msg}</span>`;
+    $('#trainBar').style.width = '0';
+    SPEED = {step:null, t:0, value:null};
+    return;
+  }
+
+  const step = tj.step, steps = tj.steps;
+  const base = (tj.start_step == null) ? 0 : tj.start_step;
+  const span = (steps && steps > base) ? steps - base : 0;
+  const done = (step == null) ? 0 : Math.max(0, step - base);
+  const p = span ? Math.min(100, done/span*100) : 0;
+  $('#trainBar').style.width = p+'%';
+
+  // 速度：只在步数真的前进时更新采样点，否则每 3 秒一次的空刷新会把
+  // 时间基准一直往后推，算出来的速度永远是 0
+  const now = Date.now() / 1000;
+  if(step != null && (SPEED.step === null || step > SPEED.step)){
+    if(SPEED.step !== null && SPEED.t) SPEED.value = (step - SPEED.step) / ((now - SPEED.t) / 60);
+    SPEED.step = step; SPEED.t = now;
+  }else if(step != null && SPEED.step !== null && step < SPEED.step){
+    SPEED = {step, t: now, value: null};
+  }
+  const spd = (SPEED.value && SPEED.value > 0) ? SPEED.value : null;
+  const left = (span && step != null) ? Math.max(0, steps - step) : null;
+  const eta = (spd && left != null) ? left / spd * 60 : null;
+  const s = CURVE_DATA && CURVE_DATA.ok ? CURVE_DATA : null;
+
+  const range = (span) ? `本次已练 ${done} / ${span} 步（起点第 ${base} 步）` : '';
+  $('#trainNow').innerHTML = `
+    <div class="rows">
+      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
+      <span class="k">进度</span><span class="v">${step!=null?step:(tj.phase==='starting'?'启动中':'?')} / ${steps??'?'}　${p?p.toFixed(0)+'%':''}</span>
+      <span class="k">最优分数</span><span class="v">${fmt(tj.best ?? (s && s.best_score),4)}</span>
+      <span class="k">验证分数</span><span class="v">${fmt(s && s.val_score,4)}</span>
+      <span class="k">速度</span><span class="v">${spd ? spd.toFixed(2)+' 步/分' : '–'}</span>
+      <span class="k">剩余</span><span class="v">${eta!=null ? '约 '+dur(eta) : '–'}</span>
+      <span class="k">已运行</span><span class="v">${dur(tj.uptime_sec||0)}</span>
+      <span class="k">PID</span><span class="v">${tj.pid||'–'}</span>
+    </div>
+    ${range?`<div class="hint" style="margin-top:8px">${esc(range)}</div>`:''}`;
+}
+
 function renderTrain(){
   const tj = STATE.train_job || {};
   const sel = $('#dataFile');
@@ -480,48 +798,8 @@ function renderTrain(){
   // 会把用户刚选好的品种强行改回去，看起来像「选不动」
   if(tj.running && tj.data_file && [...sel.options].some(o=>o.value===tj.data_file)) sel.value = tj.data_file;
 
-  // 外部训练不再禁用按钮（否则点了毫无反应，用户以为坏了），改成点击时确认
-  $('#btnTrain').disabled = !!tj.running || STARTING;
-  $('#btnTrainStop').disabled = !tj.running;
-
-  if(tj.external){
-    $('#trainBar').style.width = '0';
-    $('#trainNow').innerHTML = `<div class="rows">
-      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
-      <span class="k">进度</span><span class="v">第 ${tj.step??'?'} 步</span>
-      <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
-      <span class="k">状态</span><span class="v" style="color:var(--warn)">外部训练</span>
-    </div>
-    <div class="hint" style="margin-top:8px">${esc(tj.external_reason||'这个训练不是本控制台启动的')}，无法在此停止。要接管请先停掉原进程。</div>`;
-    return;
-  }
-  if(!tj.running){
-    let html = '';
-    if(tj.last_error){
-      html += `<div class="errbox"><div class="t">上次未能开始训练</div>${esc(tj.last_error)}</div>`;
-    }else if(tj.last_exit === 0 && tj.last_exit_age != null && tj.last_exit_age < 1800){
-      html += `<div class="hint" style="margin-bottom:6px">上次训练已正常结束（退出码 0）</div>`;
-    }
-    $('#trainNow').innerHTML = html + '<span class="dimv">没有正在运行的训练</span>';
-    $('#trainBar').style.width = '0';
-    return;
-  }
-  const step = tj.step, steps = tj.steps;
-  const base = (tj.start_step == null) ? 0 : tj.start_step;
-  const span = (steps && steps > base) ? steps - base : 0;
-  const done = (step == null) ? 0 : Math.max(0, step - base);
-  const p = span ? Math.min(100, done/span*100) : 0;
-  $('#trainBar').style.width = p+'%';
-  const range = (span) ? `本次已练 ${done} / ${span} 步（起点第 ${base} 步）` : '';
-  $('#trainNow').innerHTML = `
-    <div class="rows">
-      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
-      <span class="k">进度</span><span class="v">${step!=null?step:(tj.phase==='starting'?'启动中':'?')} / ${steps??'?'}　${p?p.toFixed(0)+'%':''}</span>
-      <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
-      <span class="k">已运行</span><span class="v">${dur(tj.uptime_sec||0)}</span>
-      <span class="k">PID</span><span class="v">${tj.pid||'–'}</span>
-    </div>
-    ${range?`<div class="hint" style="margin-top:8px">${esc(range)}</div>`:''}`;
+  renderTrainNow(tj);
+  syncTrainViz(tj);
 }
 
 async function startTrain(){
@@ -631,11 +909,13 @@ async function loadLog(reset){
 }
 
 /* ── 轮询 ── */
-$('#dataFile').addEventListener('change', loadPlan);
+$('#dataFile').addEventListener('change', ()=>{ SEL_MANUAL = true; loadPlan(); syncTrainViz(STATE?STATE.train_job:{}); });
 $('#fromScratch').addEventListener('change', loadPlan);
 let planTimer = null;
 $('#steps').addEventListener('input', ()=>{ clearTimeout(planTimer); planTimer = setTimeout(loadPlan, 300); });
 
+bindCurveHover();
+window.addEventListener('resize', ()=>{ if(TAB==='train') drawCurve(); });
 refresh().then(()=>{ renderLogKeys(); loadPlan(); });
 setInterval(()=>{ if(!document.hidden) refresh(); }, 3000);
 setInterval(()=>{ if(TAB==='train') loadTrainLog(); }, 2500);

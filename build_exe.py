@@ -44,8 +44,32 @@ def main() -> int:
     if not DIST_EXE.exists():
         print(f"未找到产物 {DIST_EXE}")
         return 1
-    shutil.copy2(DIST_EXE, TARGET)
-    print(f"完成：{TARGET}  ({TARGET.stat().st_size / 1048576:.1f} MB)")
+    size = DIST_EXE.stat().st_size / 1048576
+    try:
+        shutil.copy2(DIST_EXE, TARGET)
+    except PermissionError:
+        # 控制台正在运行时 Windows 不允许覆盖 exe。同一卷内可以把运行中的
+        # exe 改名（句柄还指着旧文件），腾出位置后新 exe 就能就位 —— 用户
+        # 下次双击启动的就是新版，不用先手动关掉。
+        prev = TARGET.with_name("AlphaMaster.prev.exe")
+        try:
+            if prev.exists():
+                prev.unlink()
+        except OSError:
+            pass
+        try:
+            TARGET.rename(prev)
+            shutil.copy2(DIST_EXE, TARGET)
+            print(f"完成：{TARGET}  ({size:.1f} MB)")
+            print("注意：旧版正在运行，已改名为 AlphaMaster.prev.exe；下次启动即为新版。")
+            return 0
+        except OSError as exc:
+            alt = TARGET.with_name("AlphaMaster.new.exe")
+            shutil.copy2(DIST_EXE, alt)
+            print(f"控制台正在运行，无法替换（{exc}）")
+            print(f"新版已放到 {alt}，关掉控制台后改名成 AlphaMaster.exe 即可。")
+            return 0
+    print(f"完成：{TARGET}  ({size:.1f} MB)")
     return 0
 
 

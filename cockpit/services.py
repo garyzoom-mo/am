@@ -30,6 +30,25 @@ _CKPT_RE = re.compile(r"_step_(\d+)\.pt$", re.I)
 _START_MARK = "启动训练 ====="
 
 
+def _thin_index(n: int, target: int) -> list[int]:
+    """把 n 个点抽稀成 target 个左右，返回要保留的下标。
+
+    取每桶最后一个点：最优分数是台阶曲线，桶内取平均会把台阶抹成斜坡；
+    取末点能保住「这一步提到了多少」。
+    """
+    if n <= target or target <= 0:
+        return list(range(n))
+    out: list[int] = []
+    for k in range(target):
+        j = int(round((k + 1) * n / target)) - 1
+        j = min(n - 1, max(0, j))
+        if not out or j > out[-1]:
+            out.append(j)
+    if out and out[-1] != n - 1:
+        out.append(n - 1)
+    return out
+
+
 @dataclass
 class Service:
     key: str
@@ -72,6 +91,9 @@ class Supervisor:
         # 数据文件体检结果（行数/时间跨度），按 路径+mtime+大小 缓存。
         # 读 parquet 需要 pandas，本进程（exe 内）没有，所以借训练用的 venv。
         self._inspect_cache: dict[str, dict[str, Any]] = {}
+        # 训练曲线（抽稀后的分数序列）与最优公式，都按 文件+mtime 缓存
+        self._series_cache: dict[str, dict[str, Any]] = {}
+        self._formula_cache: dict[str, dict[str, Any]] = {}
 
     # ── 服务定义 ────────────────────────────────────────────────────
     def definitions(self) -> dict[str, Service]:
@@ -586,6 +608,209 @@ print("__AM_JSON__" + json.dumps({
         if len(self._inspect_cache) > 64:
             self._inspect_cache.clear()
         self._inspect_cache[key] = res
+        return res
+
+    # ── 训练曲线 / 最优公式（给界面当「训练台」用）────────────────────
+    def train_series(self, symbol: str | None, target: int = 400) -> dict[str, Any]:
+        """读 training_history_<品种>.json，返回可画图的分数序列。
+
+        引擎每步往这份文件追加一行数据，比检查点新；而且训练停了它还在，
+        所以空闲状态也能看到上一轮的完整曲线。序列可能上千点，按桶抽稀到
+        target 以内 —— 取桶内最后一个点，最优分数的台阶不会被抹平。
+        """
+        am = Path(self.cfg["alphamaster"])
+        sym = (symbol or "").strip()
+        path: Path | None = None
+        if sym:
+            # 品种大小写在磁盘上不统一（XAUUSD vs ethusdt），按名字大小写不敏感找
+            want = f"training_history_{sym}.json".lower()
+            try:
+                for p in am.iterdir():
+                    if p.name.lower() == want:
+                        path = p
+                        break
+            except OSError:
+                path = None
+        if path is None and not sym:
+            # 没指定品种时用最近更新的那份，总比一片空白强
+            found = sorted(am.glob("training_history_*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            path = found[0] if found else None
+        if path is None:
+            return {"ok": False, "error": f"{sym or '该品种'}还没有训练历史", "points": 0}
+
+        try:
+            st = path.stat()
+        except OSError as exc:
+            return {"ok": False, "error": f"读不到训练历史：{exc}", "points": 0}
+
+        key = f"{path}|{st.st_mtime_ns}|{st.st_size}|{target}"
+        hit = self._series_cache.get(key)
+        if hit is not None:
+            return hit
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "error": f"训练历史解析失败：{exc}", "points": 0}
+
+        steps = raw.get("step") or []
+        best = raw.get("best_score") or []
+        val = raw.get("val_score") or []
+        n = len(steps)
+        if not n:
+            return {"ok": False, "error": "训练历史里还没有记录点", "points": 0}
+
+        # 三列长度可能不一致（某几步没写 val_score），按最短的对齐
+        n = min(n, len(best)) if best else n
+        # 历史里存的是 0 起算的循环下标，日志和界面都按「第 N 步」从 1 数，
+        # 这里统一 +1，免得曲线末端比进度里的步数少 1，看着像没跟上
+        idx = _thin_index(n, max(20, target))
+        out = {
+            "ok": True,
+            "symbol": path.stem.replace("training_history_", ""),
+            "file": path.name,
+            "points": n,
+            "kept": len(idx),
+            "step": [int(steps[i]) + 1 for i in idx],
+            "best": [float(best[i]) for i in idx] if best else [],
+            # val 可能比 step 短（有些步没写），缺的位置留 null，前端跳过
+            "val": [(float(val[i]) if i < len(val) else None) for i in idx] if val else [],
+            "step_first": int(steps[0]) + 1,
+            "step_last": int(steps[-1]) + 1,
+            "best_score": float(best[-1]) if best else None,
+            "val_score": float(val[-1]) if val else None,
+            "updated_sec": round(time.time() - st.st_mtime, 1),
+            "mtime": st.st_mtime,
+        }
+        if len(self._series_cache) > 32:
+            self._series_cache.clear()
+        self._series_cache[key] = out
+        return out
+
+    def train_formula(self, symbol: str | None) -> dict[str, Any]:
+        """取该品种最新检查点里的最优公式，解码成人能读的 token 串。
+
+        torch 只有 venv 里有（exe 不带），所以借子进程读；一个检查点几十 MB，
+        torch.load 一两次约 1~3 秒，按 路径+mtime 缓存 —— 检查点每 20 步才写
+        一次，绝大多数轮询都命中缓存。读不到检查点时退回策略文件里的公式。
+        """
+        am = Path(self.cfg["alphamaster"])
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return {"ok": False, "error": "没有指定品种"}
+
+        # 品种大小写在磁盘上并不统一：老数据是 ckpt_XAUUSD_*、策略 best_XAUUSD.json，
+        # 后来接的加密品种是 ckpt_ethusdt_*、best_ethusdt.json。按名字精确匹配会
+        # 直接落空（界面上就是「没有检查点或策略文件」），所以一律大小写不敏感。
+        # glob 在 Windows 上虽然不区分大小写，但同一个盒子里可能有 XAUUSD 与
+        # xauusd 两份，这里取步数最大的那个。
+        ckpt: Path | None = None
+        ck_dir = am / "checkpoints"
+        if ck_dir.is_dir():
+            pat = re.compile(rf"^ckpt_{re.escape(sym)}_step_(\d+)\.pt$", re.I)
+            found = []
+            for p in ck_dir.iterdir():
+                m = pat.match(p.name)
+                if m:
+                    found.append((int(m.group(1)), p))
+            if found:
+                ckpt = max(found, key=lambda x: x[0])[1]
+
+        strategy: Path | None = None
+        st_dir = am / "strategies"
+        if st_dir.is_dir():
+            want = f"best_{sym}.json".lower()
+            for p in st_dir.iterdir():
+                if p.name.lower() == want:
+                    strategy = p
+                    break
+
+        source = "ckpt" if ckpt else ("strategy" if strategy else None)
+        if source is None:
+            return {"ok": False, "error": "没有检查点或策略文件"}
+
+        target = ckpt or strategy
+        try:
+            st = target.stat()
+        except OSError as exc:
+            return {"ok": False, "error": f"读不到文件：{exc}"}
+
+        key = f"{target}|{st.st_mtime_ns}"
+        hit = self._formula_cache.get(key)
+        if hit is not None:
+            return hit
+
+        snippet = r'''
+import json, sys
+from model_core.vocab import FORMULA_VOCAB
+names = FORMULA_VOCAB.token_names
+out = {"formula": None, "decoded": None, "score": None, "step": None}
+src = sys.argv[2]
+try:
+    if src == "ckpt":
+        import torch
+        ck = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+        out["formula"] = ck.get("best_formula")
+        out["score"] = ck.get("best_score")
+        out["step"] = ck.get("step")
+    else:
+        with open(sys.argv[1], encoding="utf-8") as fp:
+            d = json.load(fp)
+        f = d.get("formula")
+        if isinstance(f, str):
+            f = json.loads(f)
+        out["formula"] = f
+        out["score"] = d.get("best_score")
+except Exception as exc:
+    out["error"] = f"{type(exc).__name__}: {exc}"
+f = out.get("formula")
+if f:
+    try:
+        toks = [int(t) for t in f]
+        out["tokens"] = toks
+        out["decoded"] = " → ".join(names[t] for t in toks)
+    except Exception as exc:
+        out["error"] = f"decode: {type(exc).__name__}: {exc}"
+print("__AM_JSON__" + json.dumps(out))
+'''
+        env = os.environ.copy()
+        env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        try:
+            proc = subprocess.run(
+                [str(self.cfg["python"]), "-c", snippet, str(target.resolve()), source],
+                cwd=str(am), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=120, env=env,
+                creationflags=winproc.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": f"读取公式失败：{type(exc).__name__}: {exc}"}
+
+        info: dict[str, Any] | None = None
+        for ln in (proc.stdout or "").splitlines():
+            if ln.startswith("__AM_JSON__"):
+                try:
+                    info = json.loads(ln[len("__AM_JSON__"):])
+                except json.JSONDecodeError:
+                    info = None
+        if info is None:
+            lines = [l.strip() for l in (proc.stderr or "").splitlines() if l.strip()]
+            return {"ok": False, "error": lines[-1] if lines else "解码失败"}
+
+        res = {
+            "ok": bool(info.get("decoded")),
+            "symbol": sym,
+            "source": source,
+            "decoded": info.get("decoded"),
+            "tokens": info.get("tokens"),
+            "score": info.get("score"),
+            "step": info.get("step"),
+        }
+        if not res["ok"]:
+            res["error"] = info.get("error") or "检查点里还没有最优公式"
+        if len(self._formula_cache) > 32:
+            self._formula_cache.clear()
+        self._formula_cache[key] = res
         return res
 
     def start_training(self, data_file: str, steps: int | None,
