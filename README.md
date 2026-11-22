@@ -145,6 +145,8 @@ python scripts/capture_readme_shots.py
 （`strategies/best_<SYM>.json`）进仓库，**检查点权重**（20MB/个）不入库但由
 `CKPT_INDEX.tsv` 记录 sha256 指纹。
 
+远端：`https://github.com/garyzoom-mo/am`（公开仓库，勿提交密钥与账户信息）
+
 ```bash
 python tools/ckpt_index.py          # 更新检查点清单（增量，秒级）
 python tools/ckpt_index.py --check  # 校验检查点是否被改动
