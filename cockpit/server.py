@@ -94,6 +94,12 @@ class CockpitServer:
                     self._json(state_mod.build_state(outer.sup, outer.cfg))
                     return
 
+                if path == "/api/train/inspect":
+                    qs = parse_qs(parsed.query)
+                    data_file = (qs.get("data_file") or [""])[0]
+                    self._json(outer.sup.inspect_data(data_file))
+                    return
+
                 if path == "/api/train/plan":
                     qs = parse_qs(parsed.query)
                     data_file = (qs.get("data_file") or [""])[0]

@@ -69,6 +69,9 @@ class Supervisor:
         self._train_exited_at: float | None = None
         self._train_state_file = log_dir / "train_state.json"
         self._load_train_state()
+        # 数据文件体检结果（行数/时间跨度），按 路径+mtime+大小 缓存。
+        # 读 parquet 需要 pandas，本进程（exe 内）没有，所以借训练用的 venv。
+        self._inspect_cache: dict[str, dict[str, Any]] = {}
 
     # ── 服务定义 ────────────────────────────────────────────────────
     def definitions(self) -> dict[str, Service]:
@@ -402,14 +405,188 @@ class Supervisor:
             add = DEFAULT_ADD_STEPS
         add = max(1, add)
         start = 0 if from_scratch else self._ckpt_step(am, symbol)
+
+        # 同一品种的检查点与策略文件只按品种命名，不含周期。换了周期还续训，
+        # 就是拿旧周期的权重接着练、练完还可能盖掉旧周期的线上公式。这里把
+        # 「上次这个品种是用哪个周期练的」一并返回，让界面能提醒一句。
+        m = re.match(r"^([A-Za-z0-9]+)_(M\d+|H\d+|D\d+)\.parquet$",
+                     Path(data_file).name, re.I) if data_file else None
+        timeframe = m.group(2).upper() if m else None
+        prior_tf = None
+        if symbol:
+            sp = am / "strategies" / f"best_{symbol}.json"
+            if sp.exists():
+                try:
+                    raw = json.loads(sp.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        prior_tf = raw.get("timeframe")
+                        if not prior_tf and raw.get("data_file"):
+                            mm = re.match(r"^[A-Za-z0-9]+_(M\d+|H\d+|D\d+)\.parquet$",
+                                          Path(str(raw["data_file"])).name, re.I)
+                            prior_tf = mm.group(1).upper() if mm else None
+                except (OSError, ValueError):
+                    prior_tf = None
+
         return {
             "symbol": symbol,
+            "timeframe": timeframe,
+            "prior_timeframe": prior_tf,
             "start_step": start,
             "add_steps": add,
             "total_steps": start + add,
             "from_scratch": from_scratch,
             "exists": bool(data_file) and Path(data_file).exists(),
         }
+
+    def inspect_data(self, data_file: str) -> dict[str, Any]:
+        """真读一遍 parquet，给出 K 线根数和时间跨度。
+
+        界面不能再靠文件体积猜「这文件能不能练」：parquet 压缩率差异极大，
+        499 根 H1 只有 19KB，被体积阈值判成空文件后就选不动。
+
+        只读 parquet 元数据（pyarrow 0.2 秒），不走 inspect_parquet_file ——
+        后者会牵进 pandas/torch，首次导入要好几秒，切一次下拉框就卡一下。
+        行数、列名、time 的 min/max 全在 footer 里，够判断了。
+        """
+        if not str(data_file or "").strip():
+            return {"ok": False, "blocking": True, "error": "没有选择数据文件"}
+        path = Path(data_file)
+        try:
+            st = path.stat()
+        except OSError:
+            return {"ok": False, "blocking": True, "error": f"数据文件不存在 {data_file}"}
+
+        key = f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}"
+        hit = self._inspect_cache.get(key)
+        if hit is not None:
+            return hit
+
+        # 不去 import config：它会拉 dotenv 等一堆东西，冷启动要 2 秒。
+        # 直接读源码里的常量，既保持同源又只花几毫秒。
+        snippet = r'''
+import json, sys, re, pathlib
+import pyarrow.parquet as pq
+
+m = re.search(r"MIN_BARS\s*=\s*(\d+)", pathlib.Path("config.py").read_text(encoding="utf-8"))
+min_bars = int(m.group(1)) if m else 300
+
+pf = pq.ParquetFile(sys.argv[1])
+md = pf.metadata
+cols = [f.name for f in pf.schema_arrow]
+vol = "tick_volume" if "tick_volume" in cols else "volume"
+missing = [c for c in ("time", "open", "high", "low", "close", vol) if c not in cols]
+
+
+def _num(v):
+    # time 既可能是 Unix 秒（int），也可能是 datetime64（部分导出工具），
+    # 后者不能直接 json 序列化，统一折成秒
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except Exception:
+        pass
+    try:
+        return float(v.timestamp())
+    except Exception:
+        return None
+
+
+tmin = tmax = None
+if "time" in cols:
+    idx = cols.index("time")
+    for i in range(md.num_row_groups):
+        st = md.row_group(i).column(idx).statistics
+        if st is not None and st.has_min_max:
+            a, b = _num(st.min), _num(st.max)
+            if a is not None:
+                tmin = a if tmin is None else min(tmin, a)
+            if b is not None:
+                tmax = b if tmax is None else max(tmax, b)
+
+print("__AM_JSON__" + json.dumps({
+    "bars": md.num_rows, "columns": cols, "missing": missing,
+    "t_min": tmin, "t_max": tmax, "min_bars": min_bars,
+}))
+'''
+        env = os.environ.copy()
+        env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        try:
+            proc = subprocess.run(
+                [str(self.cfg["python"]), "-c", snippet, str(path)],
+                cwd=str(self.cfg["alphamaster"]),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=60, env=env, creationflags=winproc.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "blocking": False,
+                    "error": f"读取数据文件失败：{type(exc).__name__}: {exc}"}
+
+        info: dict[str, Any] | None = None
+        for ln in (proc.stdout or "").splitlines():
+            if ln.startswith("__AM_JSON__"):
+                try:
+                    info = json.loads(ln[len("__AM_JSON__"):])
+                except json.JSONDecodeError:
+                    info = None
+        if not info:
+            lines = [l.strip() for l in (proc.stderr or "").splitlines() if l.strip()]
+            msg = lines[-1] if lines else f"退出码 {proc.returncode}"
+            # 「数据不足: 499 bars（至少需要 300）」这类是确定性结论，直接挡住；
+            # 其它异常（环境问题）不该阻止用户训练，只提示。
+            blocking = "数据不足" in msg or "parquet" in msg.lower() or "缺少列" in msg
+            msg = re.sub(r"^\w*Error:\s*", "", msg)
+            res = {"ok": False, "blocking": blocking, "error": msg}
+            self._inspect_cache[key] = res
+            return res
+
+        bars = int(info.get("bars") or 0)
+        missing = info.get("missing") or []
+        min_bars = int(info.get("min_bars") or 300)
+        t_min, t_max = info.get("t_min"), info.get("t_max")
+        years = None
+        try:
+            if (isinstance(t_min, (int, float)) and isinstance(t_max, (int, float))
+                    and t_max > t_min and t_max > 1_000_000_000):
+                years = round((float(t_max) - float(t_min)) / (365.25 * 24 * 3600), 2)
+        except (TypeError, ValueError):
+            years = None
+
+        tf = None
+        mm = re.match(r"^[A-Za-z0-9]+_(M\d+|H\d+|D\d+)\.parquet$", path.name, re.I)
+        if mm:
+            tf = mm.group(1).upper()
+
+        def _bad(msg: str) -> dict[str, Any]:
+            res = {"ok": False, "blocking": True, "error": msg,
+                   "bars": bars, "filename": path.name}
+            self._inspect_cache[key] = res
+            return res
+
+        # 与 data_pipeline 的校验保持一致：列齐、行数过 MIN_BARS，否则训练
+        # 进程一定会失败，不如在这里就把话说清楚
+        if missing:
+            return _bad(f"缺少列 {', '.join(missing)}"
+                        "（需要有 time/open/high/low/close 和成交量列 tick_volume 或 volume）")
+        if bars < min_bars:
+            return _bad(f"数据不足：{bars} 根 K 线（至少需要 {min_bars} 根）")
+
+        res = {
+            "ok": True,
+            "blocking": False,
+            "symbol": path.name.split("_", 1)[0].upper(),
+            "timeframe": tf,
+            "bars": bars,
+            "years": years,
+            "filename": path.name,
+            "size_mb": round(st.st_size / 1048576, 2),
+            # 4 折滚动验证下，几百根 K 线每折只有一百多根，分数不可信
+            "thin": bars < 2000,
+        }
+        if len(self._inspect_cache) > 64:
+            self._inspect_cache.clear()
+        self._inspect_cache[key] = res
+        return res
 
     def start_training(self, data_file: str, steps: int | None,
                        cost: float | None, from_scratch: bool) -> dict[str, Any]:

@@ -55,8 +55,10 @@ def _size_text(n: int) -> str:
 def scan_data_files(dirs: list[str], limit: int = 60) -> list[dict[str, Any]]:
     """找出可用于训练的数据文件。文件名必须是 <品种>_<周期>.parquet。
 
-    0 字节或几 KB 的文件是历史遗留的空壳，标为不可用并排到最后，
-    避免误选后训练直接失败。
+    只有 0 字节才算空文件。以前用「小于 64KB 即空壳」的经验阈值，结果把
+    499 根 H1 的合法数据（parquet 压缩后只有 19KB）也标成空文件、下拉框直接
+    禁用，用户看到的就是「新加的 K 线没法训练」。行数由 /api/train/inspect
+    真正读一次文件来判定，扫描阶段不猜。
     """
     seen: dict[str, dict[str, Any]] = {}
     for raw in dirs:
@@ -84,12 +86,15 @@ def scan_data_files(dirs: list[str], limit: int = 60) -> list[dict[str, Any]]:
                     "timeframe": m.group("tf").upper(),
                     "size_bytes": st.st_size,
                     "size_text": _size_text(st.st_size),
-                    "usable": st.st_size >= 65536,   # 小于 64KB 不可能是有效行情
+                    "empty": st.st_size == 0,
+                    "usable": st.st_size > 0,
                     "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
                 }
     items = sorted(
         seen.values(),
-        key=lambda x: (not x["usable"], x["symbol"], x["timeframe"]),
+        # 同品种内先给数据量大的（周期更细、历史更长的），避免把刚放进来
+        # 的几百根测试数据排到最前、变成默认选中项
+        key=lambda x: (not x["usable"], x["symbol"], -x["size_bytes"], x["timeframe"]),
     )
     return items[:limit]
 

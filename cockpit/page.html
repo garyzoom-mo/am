@@ -128,6 +128,8 @@ pre.log.mid{height:300px}
 .errbox .t{font-weight:600;margin-bottom:2px;color:#ffb3ad}
 .plan{color:var(--dim2);font-size:11.5px;margin:-4px 0 12px;font-family:var(--mono)}
 .plan b{color:var(--text)}
+.plan .bad{color:var(--bad)}
+.plan .warn{color:var(--warn);margin-top:5px;line-height:1.6;font-family:inherit}
 .toast{
   position:fixed;right:18px;bottom:18px;background:#22272e;border:1px solid var(--line);
   border-left:3px solid var(--accent);border-radius:8px;padding:9px 14px;font-size:12.5px;
@@ -392,24 +394,54 @@ async function quitAll(){
 }
 
 /* ── 训练 ── */
-let STARTING = false, PLAN = null, PLAN_KEY = '';
+let STARTING = false, PLAN = null, PLAN_KEY = '', DATAINFO = {}, DATAINFO_PENDING = {}, PLAN_SEQ = 0;
 
 function selectedAddSteps(){
   const v = parseInt($('#steps').value, 10);
   return (Number.isFinite(v) && v > 0) ? v : 2000;
 }
 
+/* 数据文件体检：真读一遍 parquet 拿 K 线根数。缓存按文件路径存，
+   同一个文件切换回来不用再等一次子进程；同一文件的并发请求合并成一次。 */
+async function ensureDataInfo(df){
+  if(!df) return null;
+  if(DATAINFO[df]) return DATAINFO[df];
+  if(DATAINFO_PENDING[df]) return DATAINFO_PENDING[df];
+  const task = (async () => {
+    try{
+      return await api('/api/train/inspect?data_file=' + encodeURIComponent(df));
+    }catch(e){
+      return {ok:false, blocking:false, error:'无法读取数据文件：' + e.message};
+    }
+  })();
+  DATAINFO_PENDING[df] = task;
+  const info = await task;
+  delete DATAINFO_PENDING[df];
+  DATAINFO[df] = info;
+  return info;
+}
+
 /* 算出「从第几步练到第几步」。不这样的话，用户在检查点 3200 时填 2000，
    AlphaMaster 会认为已经练完，打印「跳过训练」直接退出。 */
 async function loadPlan(){
   const df = $('#dataFile').value;
+  const seq = ++PLAN_SEQ;      // 连续切品种时，只认最后一次选择
   if(!df){ $('#planHint').textContent = '没有可用数据文件'; PLAN = null; return; }
+  if(!DATAINFO[df]) $('#planHint').textContent = '正在读取数据文件…';
+  const info = await ensureDataInfo(df);
+  if(seq !== PLAN_SEQ) return;
+  if(info && info.ok === false && info.blocking){
+    $('#planHint').innerHTML = `<span class="bad">${esc(info.error)}</span>`;
+    PLAN = null; PLAN_KEY = '';
+    return;
+  }
   const fs = $('#fromScratch').checked ? 1 : 0;
   const key = df + '|' + selectedAddSteps() + '|' + fs;
   if(key === PLAN_KEY && PLAN) return;
   try{
     const p = await api('/api/train/plan?data_file=' + encodeURIComponent(df)
       + '&add=' + selectedAddSteps() + '&fs=' + fs);
+    if(seq !== PLAN_SEQ) return;
     PLAN = p; PLAN_KEY = key;
     if(p.exists === false){ $('#planHint').textContent = '数据文件不存在'; return; }
     const from = fs ? 0 : p.start_step;
@@ -417,7 +449,15 @@ async function loadPlan(){
     if(fs) tail = '（从零开始，会丢弃已有检查点）';
     else if(p.start_step > 0) tail = `（已有检查点 ${p.start_step} 步）`;
     else tail = '（没有检查点，从头练）';
-    $('#planHint').innerHTML = `预计：第 <b>${from}</b> → <b>${p.total_steps}</b> 步${esc(tail)}`;
+    const bars = (info && info.ok)
+      ? `数据 ${info.bars} 根 K 线${info.years ? `（约 ${info.years} 年）` : ''} · ` : '';
+    $('#planHint').innerHTML = bars ? `${esc(bars)}预计：第 <b>${from}</b> → <b>${p.total_steps}</b> 步${esc(tail)}` : `预计：第 <b>${from}</b> → <b>${p.total_steps}</b> 步${esc(tail)}`;
+    if(info && info.ok && info.thin){
+      $('#planHint').innerHTML += `<div class="warn">K 线只有 ${info.bars} 根，滚动验证每折样本很少，分数不太可信，建议补到 2000 根以上。</div>`;
+    }
+    if(p.prior_timeframe && p.timeframe && p.prior_timeframe !== p.timeframe){
+      $('#planHint').innerHTML += `<div class="warn">这个品种上次是用 ${esc(p.prior_timeframe)} 练的，这次是 ${esc(p.timeframe)}。检查点和策略文件按品种共用，续训会接着旧周期的权重，练出的公式也可能盖掉旧周期的线上版本。</div>`;
+    }
   }catch(e){
     $('#planHint').textContent = '无法计算步数范围：' + e.message;
   }
@@ -429,8 +469,8 @@ function renderTrain(){
   if(sel.dataset.n !== String((STATE.data_files||[]).length)){
     const keep = sel.value;
     sel.innerHTML = (STATE.data_files||[]).map(f=>
-      `<option value="${esc(f.path)}" ${f.usable===false?'disabled':''}>`+
-      `${esc(f.symbol)} ${esc(f.timeframe)} — ${esc(f.name)} (${esc(f.size_text||'')}${f.usable===false?'，空文件':''})</option>`
+      `<option value="${esc(f.path)}" ${f.empty?'disabled':''}>`+
+      `${esc(f.symbol)} ${esc(f.timeframe)} — ${esc(f.name)} (${esc(f.size_text||'')}${f.empty?'，空文件':''})</option>`
     ).join('') || '<option value="">未找到 parquet 数据</option>';
     if(keep) sel.value = keep;
     sel.dataset.n = (STATE.data_files||[]).length;
@@ -489,6 +529,9 @@ async function startTrain(){
   const btn = $('#btnTrain');
   const data_file = $('#dataFile').value;
   if(!data_file) return toast('请选择数据文件', true);
+  const info = await ensureDataInfo(data_file);
+  if(info && info.ok === false && info.blocking)
+    return toast('这份数据不能训练：' + info.error, true);
   const add = selectedAddSteps();
   const costRaw = $('#cost').value;
   const cost = costRaw === '' ? null : Number(costRaw);
