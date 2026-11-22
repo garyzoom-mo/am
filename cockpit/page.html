@@ -120,6 +120,14 @@ pre.log.tall{height:calc(100vh - 260px)}
 pre.log.mid{height:300px}
 
 .empty{color:var(--dim2);font-size:12px;padding:10px 2px}
+.errbox{
+  background:#2a1214;border:1px solid #6e2226;border-left:3px solid var(--bad);
+  border-radius:6px;padding:8px 10px;color:#ff9d97;font-size:12px;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;margin-bottom:8px;
+}
+.errbox .t{font-weight:600;margin-bottom:2px;color:#ffb3ad}
+.plan{color:var(--dim2);font-size:11.5px;margin:-4px 0 12px;font-family:var(--mono)}
+.plan b{color:var(--text)}
 .toast{
   position:fixed;right:18px;bottom:18px;background:#22272e;border:1px solid var(--line);
   border-left:3px solid var(--accent);border-radius:8px;padding:9px 14px;font-size:12.5px;
@@ -167,14 +175,15 @@ pre.log.mid{height:300px}
         </div>
         <div class="row">
           <div class="field">
-            <label>训练步数（留空用默认）</label>
-            <input type="number" id="steps" placeholder="2000" min="1">
+            <label>本次追加步数</label>
+            <input type="number" id="steps" placeholder="2000" min="1" step="100">
           </div>
           <div class="field">
             <label>单边成本率</label>
             <input type="number" id="cost" placeholder="0.0005" step="0.0001" min="0">
           </div>
         </div>
+        <div class="plan" id="planHint">–</div>
         <label class="chk" style="margin-bottom:14px">
           <input type="checkbox" id="fromScratch"> 从零开始（丢弃已有检查点）
         </label>
@@ -183,7 +192,8 @@ pre.log.mid{height:300px}
           <button class="btn" id="btnTrainStop" onclick="stopTrain()" disabled>停止训练</button>
         </div>
         <div class="hint" style="margin-top:12px">
-          训练在独立进程中运行，关闭本窗口会被一起停止。
+          训练在独立进程中运行，关闭本窗口会被一起停止。<br>
+          步数是「在现有检查点之上再练多少」，不是总目标，所以每次点击都会真的开始训练。
         </div>
       </div>
 
@@ -232,9 +242,10 @@ const $ = s => document.querySelector(s);
 const H = {'X-Cockpit':'1','Content-Type':'application/json'};
 let STATE = null, TAB = 'overview', busy = {};
 
-function toast(msg, err){
+function toast(msg, err, ms){
   const t = $('#toast'); t.textContent = msg; t.className = 'toast on' + (err?' err':'');
-  clearTimeout(t._t); t._t = setTimeout(()=>t.className='toast', 2600);
+  clearTimeout(t._t);
+  t._t = setTimeout(()=>t.className='toast', ms || (err ? 9000 : 2600));
 }
 function fmt(v,d=2){
   if(v===null||v===undefined||Number.isNaN(v)) return '–';
@@ -381,6 +392,37 @@ async function quitAll(){
 }
 
 /* ── 训练 ── */
+let STARTING = false, PLAN = null, PLAN_KEY = '';
+
+function selectedAddSteps(){
+  const v = parseInt($('#steps').value, 10);
+  return (Number.isFinite(v) && v > 0) ? v : 2000;
+}
+
+/* 算出「从第几步练到第几步」。不这样的话，用户在检查点 3200 时填 2000，
+   AlphaMaster 会认为已经练完，打印「跳过训练」直接退出。 */
+async function loadPlan(){
+  const df = $('#dataFile').value;
+  if(!df){ $('#planHint').textContent = '没有可用数据文件'; PLAN = null; return; }
+  const fs = $('#fromScratch').checked ? 1 : 0;
+  const key = df + '|' + selectedAddSteps() + '|' + fs;
+  if(key === PLAN_KEY && PLAN) return;
+  try{
+    const p = await api('/api/train/plan?data_file=' + encodeURIComponent(df)
+      + '&add=' + selectedAddSteps() + '&fs=' + fs);
+    PLAN = p; PLAN_KEY = key;
+    if(p.exists === false){ $('#planHint').textContent = '数据文件不存在'; return; }
+    const from = fs ? 0 : p.start_step;
+    let tail;
+    if(fs) tail = '（从零开始，会丢弃已有检查点）';
+    else if(p.start_step > 0) tail = `（已有检查点 ${p.start_step} 步）`;
+    else tail = '（没有检查点，从头练）';
+    $('#planHint').innerHTML = `预计：第 <b>${from}</b> → <b>${p.total_steps}</b> 步${esc(tail)}`;
+  }catch(e){
+    $('#planHint').textContent = '无法计算步数范围：' + e.message;
+  }
+}
+
 function renderTrain(){
   const tj = STATE.train_job || {};
   const sel = $('#dataFile');
@@ -392,11 +434,14 @@ function renderTrain(){
     ).join('') || '<option value="">未找到 parquet 数据</option>';
     if(keep) sel.value = keep;
     sel.dataset.n = (STATE.data_files||[]).length;
+    loadPlan();
   }
-  // 正在训练时，把下拉框对齐到当前任务的数据文件，避免误以为选的是别的
-  if(tj.data_file && [...sel.options].some(o=>o.value===tj.data_file)) sel.value = tj.data_file;
-  const busyTrain = !!(tj.running || tj.external);
-  $('#btnTrain').disabled = busyTrain;
+  // 只在训练进行中把下拉框对齐到当前任务，否则每 3 秒一次的刷新
+  // 会把用户刚选好的品种强行改回去，看起来像「选不动」
+  if(tj.running && tj.data_file && [...sel.options].some(o=>o.value===tj.data_file)) sel.value = tj.data_file;
+
+  // 外部训练不再禁用按钮（否则点了毫无反应，用户以为坏了），改成点击时确认
+  $('#btnTrain').disabled = !!tj.running || STARTING;
   $('#btnTrainStop').disabled = !tj.running;
 
   if(tj.external){
@@ -407,36 +452,73 @@ function renderTrain(){
       <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
       <span class="k">状态</span><span class="v" style="color:var(--warn)">外部训练</span>
     </div>
-    <div class="hint" style="margin-top:8px">这个训练不是本控制台启动的，无法在此停止。要接管请先停掉原进程。</div>`;
+    <div class="hint" style="margin-top:8px">${esc(tj.external_reason||'这个训练不是本控制台启动的')}，无法在此停止。要接管请先停掉原进程。</div>`;
     return;
   }
-  if(!tj.running){ $('#trainNow').innerHTML = '<span class="dimv">没有正在运行的训练</span>'; $('#trainBar').style.width='0'; return; }
+  if(!tj.running){
+    let html = '';
+    if(tj.last_error){
+      html += `<div class="errbox"><div class="t">上次未能开始训练</div>${esc(tj.last_error)}</div>`;
+    }else if(tj.last_exit === 0 && tj.last_exit_age != null && tj.last_exit_age < 1800){
+      html += `<div class="hint" style="margin-bottom:6px">上次训练已正常结束（退出码 0）</div>`;
+    }
+    $('#trainNow').innerHTML = html + '<span class="dimv">没有正在运行的训练</span>';
+    $('#trainBar').style.width = '0';
+    return;
+  }
   const step = tj.step, steps = tj.steps;
-  const p = (step && steps) ? Math.min(100, step/steps*100) : 0;
+  const base = (tj.start_step == null) ? 0 : tj.start_step;
+  const span = (steps && steps > base) ? steps - base : 0;
+  const done = (step == null) ? 0 : Math.max(0, step - base);
+  const p = span ? Math.min(100, done/span*100) : 0;
   $('#trainBar').style.width = p+'%';
+  const range = (span) ? `本次已练 ${done} / ${span} 步（起点第 ${base} 步）` : '';
   $('#trainNow').innerHTML = `
     <div class="rows">
       <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
-      <span class="k">进度</span><span class="v">${step??'?'} / ${steps??'?'}　${p?p.toFixed(0)+'%':''}</span>
+      <span class="k">进度</span><span class="v">${step!=null?step:(tj.phase==='starting'?'启动中':'?')} / ${steps??'?'}　${p?p.toFixed(0)+'%':''}</span>
       <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
       <span class="k">已运行</span><span class="v">${dur(tj.uptime_sec||0)}</span>
       <span class="k">PID</span><span class="v">${tj.pid||'–'}</span>
-    </div>`;
+    </div>
+    ${range?`<div class="hint" style="margin-top:8px">${esc(range)}</div>`:''}`;
 }
 
 async function startTrain(){
+  if(STARTING) return;
+  const btn = $('#btnTrain');
   const data_file = $('#dataFile').value;
   if(!data_file) return toast('请选择数据文件', true);
-  const steps = $('#steps').value ? Number($('#steps').value) : null;
-  const cost = $('#cost').value ? Number($('#cost').value) : null;
+  const add = selectedAddSteps();
+  const costRaw = $('#cost').value;
+  const cost = costRaw === '' ? null : Number(costRaw);
+  if(cost !== null && (!Number.isFinite(cost) || cost < 0)) return toast('成本率不合法', true);
   const from_scratch = $('#fromScratch').checked;
-  if(from_scratch && !confirm('从零开始会丢弃该品种已有的训练进度，继续？')) return;
+  const tj = STATE.train_job || {};
+  if(from_scratch && !confirm('从零开始会删除该品种已有的全部检查点，继续？')) return;
+  if(tj.external && !confirm('检测到疑似外部训练：' + (tj.external_reason || '训练历史刚被更新')
+      + '\n同时启动可能互相覆盖检查点，仍要启动吗？')) return;
+
+  STARTING = true;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '启动中…';
+  toast('正在启动训练…');
   try{
-    const r = await api('/api/train/start',{data_file, steps, cost, from_scratch});
-    if(!r.ok) throw new Error(r.error||'启动失败');
-    toast('训练已启动 pid='+r.pid);
-  }catch(e){ toast('启动失败：'+e.message, true); }
-  refresh(); setTimeout(loadTrainLog, 1200);
+    const r = await api('/api/train/start', {data_file, steps:add, cost, from_scratch});
+    if(!r.ok) throw new Error(r.error || '启动失败');
+    const range = (r.start_step != null) ? `（第 ${r.start_step} → ${r.total_steps} 步）` : '';
+    toast('训练已启动 pid=' + r.pid + range);
+  }catch(e){
+    toast('启动失败：' + e.message, true);
+  }finally{
+    STARTING = false;
+    btn.textContent = label;
+    btn.disabled = false;
+    await refresh();
+    loadPlan();
+  }
+  if(TAB === 'train') setTimeout(loadTrainLog, 800);
 }
 async function stopTrain(){
   try{ await api('/api/train/stop',{}); toast('训练已停止'); }catch(e){ toast('停止失败：'+e.message, true); }
@@ -506,7 +588,12 @@ async function loadLog(reset){
 }
 
 /* ── 轮询 ── */
-refresh().then(renderLogKeys);
+$('#dataFile').addEventListener('change', loadPlan);
+$('#fromScratch').addEventListener('change', loadPlan);
+let planTimer = null;
+$('#steps').addEventListener('input', ()=>{ clearTimeout(planTimer); planTimer = setTimeout(loadPlan, 300); });
+
+refresh().then(()=>{ renderLogKeys(); loadPlan(); });
 setInterval(()=>{ if(!document.hidden) refresh(); }, 3000);
 setInterval(()=>{ if(TAB==='train') loadTrainLog(); }, 2500);
 setInterval(()=>{ if(TAB==='live') loadLiveLog(); }, 2500);

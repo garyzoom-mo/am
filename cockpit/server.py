@@ -94,6 +94,20 @@ class CockpitServer:
                     self._json(state_mod.build_state(outer.sup, outer.cfg))
                     return
 
+                if path == "/api/train/plan":
+                    qs = parse_qs(parsed.query)
+                    data_file = (qs.get("data_file") or [""])[0]
+                    raw_add = (qs.get("add") or [""])[0]
+                    try:
+                        add = int(raw_add) if raw_add else None
+                    except ValueError:
+                        add = None
+                    self._json(outer.sup.training_plan(
+                        data_file, add_steps=add,
+                        from_scratch=(qs.get("fs") or ["0"])[0] in ("1", "true", "yes"),
+                    ))
+                    return
+
                 if path == "/api/log":
                     qs = parse_qs(parsed.query)
                     key = (qs.get("key") or ["web"])[0]

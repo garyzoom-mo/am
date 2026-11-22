@@ -128,8 +128,16 @@ def build_state(supervisor, cfg: dict[str, Any]) -> dict[str, Any]:
     #   别处起的训练      → managed=False / external=True，界面只能提示
     #   没有训练
     train_job: dict[str, Any] = dict(training)
-    if detail and not training.get("running"):
+    # 自己刚跑完的训练，历史文件 mtime 还热着，am 会当成「有进程在写」。
+    # 这时候如果标成外部训练，界面会把「开始训练」拦下来，用户点了没反应。
+    own_recent = (training.get("last_exit_age") is not None
+                  and training["last_exit_age"] < 180)
+    if detail and not training.get("running") and not own_recent:
         train_job["external"] = True
+        train_job["external_reason"] = (
+            f"训练历史 {detail.get('updated_sec') or 0:.0f} 秒前仍在更新"
+            if detail.get("updated_sec") is not None else "检测到别的进程在写训练历史"
+        )
         train_job["symbol"] = train_job.get("symbol") or detail["symbol"]
     if detail and train_job.get("symbol") is None:
         train_job["symbol"] = detail["symbol"]
@@ -139,9 +147,31 @@ def build_state(supervisor, cfg: dict[str, Any]) -> dict[str, Any]:
         train_job["best"] = detail["best"]
     if detail.get("updated_sec") is not None:
         train_job["updated_sec"] = detail["updated_sec"]
+
+    # 历史文件最多 10 秒才写一次，刚启动时还没有它 —— 用训练日志里的
+    # 「[N/M]」补上，否则界面一直是「? / 2000」，看着像没开始。
+    prog: dict[str, Any] = {}
+    if training.get("running"):
+        try:
+            prog = supervisor.train_progress()
+        except Exception:  # noqa: BLE001
+            prog = {}
+        if prog.get("step") is not None:
+            cur = train_job.get("step")
+            if cur is None or prog["step"] >= int(cur):
+                train_job["step"] = prog["step"]
+        if prog.get("total"):
+            train_job["steps"] = prog["total"]
+        # 训练历史里最后一条是上一轮的步数（比续训起点还小），启动瞬间
+        # 显示成「3199 / 3230」会让人以为快练完了，这里兜到起点
+        base = train_job.get("start_step")
+        cur = train_job.get("step")
+        if base is not None and (cur is None or int(cur) < int(base)):
+            train_job["step"] = int(base)
+
     train_job.setdefault("managed", bool(training.get("running")))
     train_job.setdefault("external", False)
-    # 目标步数：本次启动时指定的优先，其次才看历史文件里有没有总步数
+    # 目标步数：本次启动时算出来的总目标优先
     if not train_job.get("steps"):
         train_job["steps"] = train_job.get("target_steps") or None
 
