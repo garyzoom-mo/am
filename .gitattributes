@@ -1,2 +1,19 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析异常（重新 clone 时尤其要注意）
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制：不做换行转换，也不参与文本 diff
+*.pt      binary
+*.pth     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.pdf     binary
+*.docx    binary
+*.xlsx    binary
+*.parquet binary
