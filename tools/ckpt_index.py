@@ -43,18 +43,29 @@ def _sha256(path: Path, chunk: int = 1 << 20) -> str:
 def load_existing(out: Path) -> dict[str, tuple[str, str]]:
     """读旧清单，返回 {file: (size_mb, sha256)} 用于缓存命中。"""
     cache: dict[str, tuple[str, str]] = {}
+    for row in load_rows(out):
+        cache[row[5]] = (row[2], row[4])
+    return cache
+
+
+def load_rows(out: Path) -> list[tuple]:
+    """读旧清单的数据行，用于判断「有没有实质变化」。"""
+    rows: list[tuple] = []
     if not out.exists():
-        return cache
+        return rows
     try:
         for line in out.read_text(encoding="utf-8").splitlines():
             if not line or line.startswith("#") or line.startswith("symbol\t"):
                 continue
             parts = line.split("\t")
             if len(parts) >= 6:
-                cache[parts[5]] = (parts[2], parts[4])
+                try:
+                    rows.append((parts[0], int(parts[1]), parts[2], parts[3], parts[4], parts[5]))
+                except ValueError:
+                    continue
     except OSError:
         pass
-    return cache
+    return rows
 
 
 def scan(dirpath: Path, out: Path, full: bool = False) -> list[tuple]:
@@ -92,12 +103,7 @@ def verify(dirpath: Path, out: Path) -> int:
         return 2
     bad = 0
     total = 0
-    for line in out.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or line.startswith("symbol\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) < 6:
-            continue
+    for parts in load_rows(out):
         total += 1
         name, expect = parts[5], parts[4]
         path = dirpath / name
@@ -131,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         return verify(dirpath, out)
 
     rows = scan(dirpath, out, full=args.full)
+
+    # 没有实质变化就不重写，避免只改时间戳导致 git 里出现无意义 diff
+    if not args.full and load_rows(out) == rows:
+        print(f"{out} 无变化（{len(rows)} 个检查点），未重写")
+        return 0
+
     lines = [
         "# 检查点索引 —— 由 tools/ckpt_index.py 生成，勿手改",
         f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",

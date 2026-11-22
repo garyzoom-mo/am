@@ -139,6 +139,23 @@ python scripts/capture_readme_shots.py
 
 ---
 
+## 版本管理
+
+本项目自 2026-11-22 起用 git 管理，三层分离：**代码**与**公式文件**
+（`strategies/best_<SYM>.json`）进仓库，**检查点权重**（20MB/个）不入库但由
+`CKPT_INDEX.tsv` 记录 sha256 指纹。
+
+```bash
+python tools/ckpt_index.py          # 更新检查点清单（增量，秒级）
+python tools/ckpt_index.py --check  # 校验检查点是否被改动
+git log --oneline -- strategies/    # 查每次训练的公式变化
+```
+
+完整说明见 [docs/版本管理.md](docs/版本管理.md)：什么进了仓库、模型版本怎么追溯、
+一次训练实验的标准流程、回滚与打 tag。
+
+---
+
 ## License
 
 本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE)。  
