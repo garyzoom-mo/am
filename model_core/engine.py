@@ -1249,20 +1249,10 @@ class AlphaEngine:
             self.training_history.setdefault('batch_fml_div', []).append(fml_div)
 
             # 策略快照兜底同步：每个 checkpoint 周期写一次即可。
-            # best 更新时 _save_strategy_live() 已经立即原子落盘，这里原来
-            # 每步都 open+json.dump 一遍同一个文件，是纯浪费（且持 GIL）。
+            # 统一走 _save_strategy_live()——它有「磁盘更优就不覆盖」的保护，
+            # 原先这里另写一份精简 JSON，会把更差的 best 直接盖上去。
             if (step + 1) % 20 == 0 and self.best_formula is not None:
-                from .vocab import VOCAB_VERSION
-                strategy_data = {
-                    "vocab_version": VOCAB_VERSION,
-                    "symbol": self.target_symbol,
-                    "formula": self.best_formula,
-                    "best_score": self.best_score,
-                }
-                save_path = _strategy_file_for_symbol(self.target_symbol)
-                pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(save_path, "w") as fp:
-                    json.dump(strategy_data, fp, indent=2)
+                self._save_strategy_live()
 
             # 训练曲线落盘：Web 监控面板靠它做实时展示。
             # 每步写一次会让 JSON 序列化量随步数线性膨胀（9000 步时单文件
@@ -1392,20 +1382,11 @@ class AlphaEngine:
         # 仅当跑满最终步时才保存最终 strategy 和历史
         if end_step == ModelConfig.TRAIN_STEPS:
             if self.best_formula is not None:
-                from .vocab import VOCAB_VERSION
-                strategy_data = {
-                    "vocab_version": VOCAB_VERSION,
-                    "symbol": self.target_symbol,
-                    "formula": self.best_formula,
-                    "best_score": self.best_score,
-                }
+                # 走统一入口：里面有「磁盘已有更高分就不覆盖」的保护。
+                # 以前这里单独再写一次，续训时会把线上更优的策略文件盖成
+                # 本轮重启后的低分公式（实测 1.5602 → 1.4078）。
+                self._save_strategy_live()
                 save_path = _strategy_file_for_symbol(self.target_symbol)
-                pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                # P1-3: 原子写入
-                tmp_path = save_path + ".tmp"
-                with open(tmp_path, "w", encoding="utf-8") as fp:
-                    json.dump(strategy_data, fp, indent=2, ensure_ascii=False)
-                os.replace(tmp_path, save_path)
 
             sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
             self.training_history.pop('_low_entropy_streak', None)
@@ -1481,6 +1462,19 @@ class AlphaEngine:
                         existing = raw
                 except Exception:
                     existing = {}
+
+            # 续训时引擎的 best_score 有可能被重置回本轮批次的最优（比检查点里
+            # 记录的全局最优还低），这会把线上正在用的策略文件覆盖成更差的公式。
+            # 磁盘分数更高就闭嘴不动它——引擎内部照常训练，只是不降级发布。
+            try:
+                old_score = float(existing.get("best_score"))
+            except (TypeError, ValueError):
+                old_score = None
+            if (old_score is not None and math.isfinite(old_score)
+                    and old_score > float(self.best_score) + 1e-12):
+                tqdm.write(f"[策略] 磁盘已有更优 {old_score:.4f} > 本次 "
+                           f"{float(self.best_score):.4f}，跳过覆盖 {p.name}")
+                return
 
             strategy_data = {
                 "vocab_version": VOCAB_VERSION,
