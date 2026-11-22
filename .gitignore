@@ -125,3 +125,16 @@ secrets/
 credentials*.json
 local_settings*.json
 ark_rotation_state.json
+
+# ── 控制台（cockpit）──────────────────────────────────────────────
+# 打包产物：体积大且可重建（python build_exe.py）
+build/
+dist/
+*.spec
+AlphaMaster.exe
+
+# 首次运行自动生成的路径配置（含本机绝对路径）
+cockpit.json
+
+# 运行时日志与浏览器配置目录
+logs/

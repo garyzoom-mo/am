@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AlphaMaster 控制台</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#252d3a;
+  --text:#e6edf3; --dim:#8b949e; --dim2:#6b7684;
+  --up:#f85149;      /* 中国习惯：涨=红 */
+  --down:#3fb950;    /* 跌=绿 */
+  --accent:#58a6ff; --warn:#d29922; --ok:#3fb950; --bad:#f85149;
+  --mono:"JetBrains Mono","Cascadia Mono",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg);color:var(--text);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+button{font:inherit;cursor:pointer}
+.btn{
+  background:var(--panel2);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:5px 12px;transition:.15s;
+}
+.btn:hover{border-color:var(--accent);color:#fff}
+.btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn.primary:hover{background:#388bfd}
+.btn.danger{background:#3d1518;border-color:#6e2226;color:#ff9d97}
+.btn.danger:hover{background:#5a1c20;border-color:#f85149}
+.btn.ghost{background:transparent}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{padding:3px 9px;font-size:12px}
+
+/* ── 顶栏 ── */
+.top{
+  display:flex;align-items:center;gap:14px;padding:9px 16px;
+  background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto;
+}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px;letter-spacing:.3px}
+.brand .led{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.brand .led.off{background:var(--dim2);box-shadow:none}
+.kpis{display:flex;gap:0;margin-left:6px}
+.kpi{display:flex;flex-direction:column;line-height:1.25;padding:0 16px}
+.kpi + .kpi{border-left:1px solid var(--line)}
+.kpi:first-child{padding-left:6px}
+.kpi .k{font-size:10.5px;color:var(--dim);letter-spacing:.4px}
+.kpi .v{font-family:var(--mono);font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
+.spacer{flex:1}
+.clock{font-family:var(--mono);color:var(--dim);font-size:12px}
+
+/* ── 页签 ── */
+.tabs{display:flex;gap:2px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto}
+.tab{
+  padding:8px 16px;color:var(--dim);border:none;background:transparent;
+  border-bottom:2px solid transparent;font-size:12.5px;
+}
+.tab:hover{color:var(--text)}
+.tab.on{color:#fff;border-bottom-color:var(--accent)}
+
+main{flex:1;overflow:auto;padding:14px 16px 24px}
+section{display:none}
+section.on{display:block}
+
+h3{margin:0 0 10px;font-size:12px;color:var(--dim);font-weight:600;letter-spacing:.6px;text-transform:uppercase}
+.hint{color:var(--dim2);font-size:11.5px}
+
+/* ── 服务卡 ── */
+.svcs{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin-bottom:20px}
+.svc{
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 13px;
+  display:flex;flex-direction:column;gap:9px;
+}
+.svc .hd{display:flex;align-items:center;gap:8px}
+.svc .nm{font-weight:600}
+.svc .st{margin-left:auto;font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim)}
+.st.run{color:#7ee787;border-color:#2ea04340;background:#12261a}
+.st.stop{color:var(--dim)}
+.st.bad{color:#ff9d97;border-color:#6e2226;background:#2a1214}
+.svc .ds{color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+.svc .ft{display:flex;align-items:center;gap:8px}
+.svc .ft .meta{color:var(--dim2);font-size:11px;font-family:var(--mono)}
+
+/* ── 品种卡 ── */
+.syms{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px}
+.sym{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+.sym .hd{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.sym .cd{font-weight:700;letter-spacing:.4px}
+.rows{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12px}
+.rows .k{color:var(--dim)}
+.rows .v{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.up{color:var(--up)} .down{color:var(--down)} .dimv{color:var(--dim)}
+
+/* ── 训练 / 表单 ── */
+.grid2{display:grid;grid-template-columns:minmax(360px,520px) 1fr;gap:14px;align-items:start}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.field label{font-size:11.5px;color:var(--dim)}
+input[type=text],input[type=number],select{
+  background:#0b0f16;border:1px solid var(--line);color:var(--text);
+  border-radius:6px;padding:7px 9px;font:12.5px var(--mono);outline:none;width:100%;
+}
+input:focus,select:focus{border-color:var(--accent)}
+.row{display:flex;gap:10px}
+.row>*{flex:1}
+.chk{display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px;cursor:pointer}
+.chk input{width:14px;height:14px;accent-color:var(--accent)}
+.bar{height:6px;background:#0b0f16;border-radius:20px;overflow:hidden;margin:8px 0 4px}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,#1f6feb,#58a6ff);width:0;transition:.4s}
+
+/* ── 日志 ── */
+pre.log{
+  background:#080b10;border:1px solid var(--line);border-radius:8px;
+  margin:0;padding:10px 12px;font:11.5px/1.55 var(--mono);color:#c9d1d9;
+  overflow:auto;white-space:pre-wrap;word-break:break-all;
+}
+pre.log.tall{height:calc(100vh - 260px)}
+pre.log.mid{height:300px}
+
+.empty{color:var(--dim2);font-size:12px;padding:10px 2px}
+.toast{
+  position:fixed;right:18px;bottom:18px;background:#22272e;border:1px solid var(--line);
+  border-left:3px solid var(--accent);border-radius:8px;padding:9px 14px;font-size:12.5px;
+  box-shadow:0 8px 24px #0008;opacity:0;transform:translateY(8px);transition:.25s;pointer-events:none;
+  max-width:420px;
+}
+.toast.on{opacity:1;transform:none}
+.toast.err{border-left-color:var(--bad)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand"><span class="led" id="led"></span>AlphaMaster 控制台</div>
+  <div class="kpis" id="kpis"></div>
+  <div class="spacer"></div>
+  <div class="clock" id="clock">–</div>
+  <button class="btn danger" onclick="quitAll()">停止全部并退出</button>
+</header>
+
+<nav class="tabs">
+  <button class="tab on" data-tab="overview">总览</button>
+  <button class="tab" data-tab="train">训练</button>
+  <button class="tab" data-tab="live">实盘</button>
+  <button class="tab" data-tab="log">日志</button>
+</nav>
+
+<main>
+  <!-- 总览 -->
+  <section id="tab-overview" class="on">
+    <h3>服务</h3>
+    <div class="svcs" id="svcs"></div>
+    <h3>品种</h3>
+    <div class="syms" id="syms"></div>
+  </section>
+
+  <!-- 训练 -->
+  <section id="tab-train">
+    <div class="grid2">
+      <div class="card">
+        <h3>新建训练</h3>
+        <div class="field">
+          <label>数据文件</label>
+          <select id="dataFile"></select>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>训练步数（留空用默认）</label>
+            <input type="number" id="steps" placeholder="2000" min="1">
+          </div>
+          <div class="field">
+            <label>单边成本率</label>
+            <input type="number" id="cost" placeholder="0.0005" step="0.0001" min="0">
+          </div>
+        </div>
+        <label class="chk" style="margin-bottom:14px">
+          <input type="checkbox" id="fromScratch"> 从零开始（丢弃已有检查点）
+        </label>
+        <div style="display:flex;gap:10px">
+          <button class="btn primary" id="btnTrain" onclick="startTrain()">开始训练</button>
+          <button class="btn" id="btnTrainStop" onclick="stopTrain()" disabled>停止训练</button>
+        </div>
+        <div class="hint" style="margin-top:12px">
+          训练在独立进程中运行，关闭本窗口会被一起停止。
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>当前任务</h3>
+        <div id="trainNow" class="empty">没有正在运行的训练</div>
+        <div class="bar"><i id="trainBar"></i></div>
+        <pre class="log mid" id="trainLog">等待训练…</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 实盘 -->
+  <section id="tab-live">
+    <div class="grid2">
+      <div class="card">
+        <h3>实盘循环</h3>
+        <div id="liveList"></div>
+        <div class="hint" style="margin-top:12px">
+          启动后每根 bar 收盘触发一次；停止走 Ctrl+C，让执行器自己写停止心跳。
+        </div>
+      </div>
+      <div class="card">
+        <h3>执行器日志</h3>
+        <pre class="log mid" id="liveLog">–</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-log">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+      <select id="logKey" style="max-width:260px"></select>
+      <button class="btn sm" onclick="loadLog(true)">刷新</button>
+      <label class="chk"><input type="checkbox" id="autoScroll" checked> 自动滚到底</label>
+      <span class="hint" id="logMeta"></span>
+    </div>
+    <pre class="log tall" id="logBox">–</pre>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const H = {'X-Cockpit':'1','Content-Type':'application/json'};
+let STATE = null, TAB = 'overview', busy = {};
+
+function toast(msg, err){
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast on' + (err?' err':'');
+  clearTimeout(t._t); t._t = setTimeout(()=>t.className='toast', 2600);
+}
+function fmt(v,d=2){
+  if(v===null||v===undefined||Number.isNaN(v)) return '–';
+  return Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
+}
+function pct(v,d=2){ return (v===null||v===undefined||Number.isNaN(v))?'–':(v*100).toFixed(d)+'%'; }
+function ago(s){
+  if(s===null||s===undefined) return '–';
+  s = Math.max(0, Math.round(s));
+  if(s<60) return s+' 秒前';
+  if(s<3600) return Math.round(s/60)+' 分钟前';
+  if(s<86400) return (s/3600).toFixed(1)+' 小时前';
+  return Math.round(s/86400)+' 天前';
+}
+function dur(s){
+  s=Math.max(0,s|0);
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  if(h) return `${h}h${String(m).padStart(2,'0')}m`;
+  if(m) return `${m}m${String(x).padStart(2,'0')}s`;
+  return x+'s';
+}
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function api(path, body){
+  const opt = body===undefined ? {} : {method:'POST', headers:H, body:JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  let j = {};
+  try{ j = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+
+/* ── 页签 ── */
+document.querySelectorAll('.tab').forEach(b=>{
+  b.onclick = ()=>{
+    TAB = b.dataset.tab;
+    document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on', x===b));
+    document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id==='tab-'+TAB));
+    if(TAB==='log') loadLog(true);
+    if(TAB==='train') loadTrainLog();
+    if(TAB==='live') loadLiveLog();
+  };
+});
+
+/* ── 状态刷新 ── */
+async function refresh(){
+  try{
+    STATE = await api('/api/state');
+    renderTop(); renderServices(); renderSymbols(); renderTrain(); renderLive();
+    $('#led').className = 'led';
+    $('#clock').textContent = STATE.now;
+  }catch(e){
+    $('#led').className = 'led off';
+    $('#clock').textContent = '连接断开';
+  }
+}
+
+function renderTop(){
+  const sv = STATE.services || [];
+  const running = sv.filter(s=>s.running).length;
+  const pos = (STATE.symbols||[]).filter(s=>s.position && Math.abs(s.position.volume||0)>1e-9).length;
+  const tj = STATE.train_job || {};
+  const trainTxt = tj.running ? ('第 '+(tj.step??'?')+' 步')
+                 : tj.external ? ('外部 '+(tj.step??'?')+' 步') : '空闲';
+  const trainColor = tj.running ? 'var(--accent)' : tj.external ? 'var(--warn)' : 'var(--dim)';
+  $('#kpis').innerHTML = `
+    <div class="kpi"><span class="k">服务</span><span class="v">${running}/${sv.length}</span></div>
+    <div class="kpi"><span class="k">持仓</span><span class="v">${pos}</span></div>
+    <div class="kpi"><span class="k">训练</span><span class="v" style="color:${trainColor}">${trainTxt}</span></div>
+    <div class="kpi"><span class="k">进程托管</span><span class="v" style="color:${STATE.app.job_object?'var(--ok)':'var(--warn)'}">${STATE.app.job_object?'已启用':'降级'}</span></div>`;
+}
+
+function renderServices(){
+  const box = $('#svcs'); const sv = STATE.services || [];
+  box.innerHTML = sv.map(s=>{
+    const cls = s.running ? (s.healthy===false && s.port ? 'st bad' : 'st run') : 'st stop';
+    const txt = s.running ? (s.healthy===false && s.port ? '启动中' : '运行中') : '已停止';
+    const meta = s.running
+      ? (s.port ? `127.0.0.1:${s.port} · ` : '') + dur(s.uptime_sec)
+      : (s.last_exit!==null && s.last_exit!==undefined ? `上次退出码 ${s.last_exit}` : '未启动');
+    return `<div class="svc">
+      <div class="hd"><span class="nm">${esc(s.title)}</span><span class="${cls}">${txt}</span></div>
+      <div class="ds">${esc(s.desc)}</div>
+      <div class="ft">
+        <span class="meta">${meta}</span>
+        <span style="flex:1"></span>
+        ${s.running
+          ? `<button class="btn sm" onclick="svcStop('${s.key}')">停止</button>`
+          : `<button class="btn sm primary" onclick="svcStart('${s.key}', false)">启动</button>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSymbols(){
+  const box = $('#syms'); const list = STATE.symbols || [];
+  if(!list.length){ box.innerHTML = '<div class="empty">没有发现品种。检查 factor-governor 路径是否正确。</div>'; return; }
+  box.innerHTML = list.map(s=>{
+    const acct = s.account || {}, acc = acct.account || {}, pos = s.position || {};
+    const mdl = s.model || {}, sig = s.signal || {}, tr = s.training || {};
+    const rows = [];
+    if(acct.ok && acc.equity!=null){
+      const pnl = (acc.equity||0)-(acc.balance||0);
+      const cls = Math.abs(pnl)<0.005 ? 'dimv' : (pnl>0?'up':'down');
+      rows.push(['权益', `<span class="${cls}">${fmt(acc.equity)}</span>`]);
+    }else{
+      rows.push(['账户', `<span style="color:var(--warn)">未连接</span>`]);
+    }
+    if(pos && pos.volume){
+      rows.push(['持仓', `${pos.side||''} ${fmt(pos.volume,4)} @ ${fmt(pos.avg_price,4)}`]);
+    }else{
+      rows.push(['持仓', '<span class="dimv">空仓</span>']);
+    }
+    if(mdl.version) rows.push(['模型', `<span class="dimv">${esc(String(mdl.version).replace(/^v/,''))}</span>`]);
+    if(sig.direction) rows.push(['信号', `${esc(sig.direction)} <span class="dimv">${fmt(sig.composite,3)}</span>`]);
+    if(tr.running) rows.push(['训练', `<span style="color:var(--accent)">第 ${tr.step??tr.ckpt_step??'?'} 步</span>`]);
+    const st = s.state || 'unknown';
+    const stmap = {running:['运行中','st run'],waiting:['等待','st run'],dead:['已停止','st stop'],stalled:['心跳停滞','st bad'],idle:['待机','st stop'],training:['训练中','st run'],unknown:['未知','st stop']};
+    const [stt, stc] = stmap[st] || ['未知','st stop'];
+    return `<div class="sym">
+      <div class="hd"><span class="cd">${esc(s.symbol)}</span>
+        <span class="${stc}">${stt}</span>
+        <span style="margin-left:auto" class="hint">${s.heartbeat?ago(s.heartbeat.beat_age):''}</span></div>
+      <div class="rows">${rows.map(([k,v])=>`<span class="k">${k}</span><span class="v">${v}</span>`).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ── 服务操作 ── */
+async function svcStart(key, dry){
+  try{ const r = await api('/api/service/start',{key, dry_run:!!dry}); toast(r.already?'已在运行':'已启动 '+key); }
+  catch(e){ toast('启动失败：'+e.message, true); }
+  refresh();
+}
+async function svcStop(key){
+  try{ const r = await api('/api/service/stop',{key}); toast('已停止（'+(r.how||'ok')+'）'); }
+  catch(e){ toast('停止失败：'+e.message, true); }
+  refresh();
+}
+async function quitAll(){
+  if(!confirm('停止全部服务并退出控制台？\n实盘循环会被优雅停止。')) return;
+  try{ await api('/api/quit',{}); }catch(e){}
+  document.body.innerHTML = '<div style="padding:40px;color:#8b949e">正在停止所有服务…</div>';
+}
+
+/* ── 训练 ── */
+function renderTrain(){
+  const tj = STATE.train_job || {};
+  const sel = $('#dataFile');
+  if(sel.dataset.n !== String((STATE.data_files||[]).length)){
+    const keep = sel.value;
+    sel.innerHTML = (STATE.data_files||[]).map(f=>
+      `<option value="${esc(f.path)}" ${f.usable===false?'disabled':''}>`+
+      `${esc(f.symbol)} ${esc(f.timeframe)} — ${esc(f.name)} (${esc(f.size_text||'')}${f.usable===false?'，空文件':''})</option>`
+    ).join('') || '<option value="">未找到 parquet 数据</option>';
+    if(keep) sel.value = keep;
+    sel.dataset.n = (STATE.data_files||[]).length;
+  }
+  // 正在训练时，把下拉框对齐到当前任务的数据文件，避免误以为选的是别的
+  if(tj.data_file && [...sel.options].some(o=>o.value===tj.data_file)) sel.value = tj.data_file;
+  const busyTrain = !!(tj.running || tj.external);
+  $('#btnTrain').disabled = busyTrain;
+  $('#btnTrainStop').disabled = !tj.running;
+
+  if(tj.external){
+    $('#trainBar').style.width = '0';
+    $('#trainNow').innerHTML = `<div class="rows">
+      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
+      <span class="k">进度</span><span class="v">第 ${tj.step??'?'} 步</span>
+      <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
+      <span class="k">状态</span><span class="v" style="color:var(--warn)">外部训练</span>
+    </div>
+    <div class="hint" style="margin-top:8px">这个训练不是本控制台启动的，无法在此停止。要接管请先停掉原进程。</div>`;
+    return;
+  }
+  if(!tj.running){ $('#trainNow').innerHTML = '<span class="dimv">没有正在运行的训练</span>'; $('#trainBar').style.width='0'; return; }
+  const step = tj.step, steps = tj.steps;
+  const p = (step && steps) ? Math.min(100, step/steps*100) : 0;
+  $('#trainBar').style.width = p+'%';
+  $('#trainNow').innerHTML = `
+    <div class="rows">
+      <span class="k">品种</span><span class="v">${esc(tj.symbol||'–')}</span>
+      <span class="k">进度</span><span class="v">${step??'?'} / ${steps??'?'}　${p?p.toFixed(0)+'%':''}</span>
+      <span class="k">最优分数</span><span class="v">${fmt(tj.best,4)}</span>
+      <span class="k">已运行</span><span class="v">${dur(tj.uptime_sec||0)}</span>
+      <span class="k">PID</span><span class="v">${tj.pid||'–'}</span>
+    </div>`;
+}
+
+async function startTrain(){
+  const data_file = $('#dataFile').value;
+  if(!data_file) return toast('请选择数据文件', true);
+  const steps = $('#steps').value ? Number($('#steps').value) : null;
+  const cost = $('#cost').value ? Number($('#cost').value) : null;
+  const from_scratch = $('#fromScratch').checked;
+  if(from_scratch && !confirm('从零开始会丢弃该品种已有的训练进度，继续？')) return;
+  try{
+    const r = await api('/api/train/start',{data_file, steps, cost, from_scratch});
+    if(!r.ok) throw new Error(r.error||'启动失败');
+    toast('训练已启动 pid='+r.pid);
+  }catch(e){ toast('启动失败：'+e.message, true); }
+  refresh(); setTimeout(loadTrainLog, 1200);
+}
+async function stopTrain(){
+  try{ await api('/api/train/stop',{}); toast('训练已停止'); }catch(e){ toast('停止失败：'+e.message, true); }
+  refresh();
+}
+async function loadTrainLog(){
+  try{
+    const r = await api('/api/log?key=train&n=400');
+    const box = $('#trainLog'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.textContent = (r.lines||[]).join('\n') || '（暂无输出）';
+    if(atBottom) box.scrollTop = box.scrollHeight;
+  }catch(e){}
+}
+async function loadLiveLog(){
+  try{
+    const live = (STATE.services||[]).find(s=>s.kind==='live' && s.running) || (STATE.services||[]).find(s=>s.kind==='live');
+    if(!live) return;
+    const r = await api('/api/log?key='+encodeURIComponent(live.key)+'&n=300');
+    const box = $('#liveLog'); const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.textContent = (r.lines||[]).join('\n') || '（暂无输出）';
+    if(atBottom) box.scrollTop = box.scrollHeight;
+  }catch(e){}
+}
+
+function renderLive(){
+  const box = $('#liveList');
+  const live = (STATE.services||[]).filter(s=>s.kind==='live');
+  if(!live.length){ box.innerHTML = '<div class="empty">配置里没有启用实盘品种</div>'; return; }
+  box.innerHTML = live.map(s=>{
+    const cls = s.running ? 'st run' : 'st stop';
+    return `<div class="svc" style="margin-bottom:10px">
+      <div class="hd"><span class="nm">${esc(s.title)}</span><span class="${cls}">${s.running?'运行中':'已停止'}</span></div>
+      <div class="ds">${esc(s.desc)}${s.pid?' · pid '+s.pid:''}</div>
+      <div class="ft">
+        <label class="chk"><input type="checkbox" id="dry-${s.key}" ${s.running?'disabled':''}> dry-run（只算不下单）</label>
+        <span style="flex:1"></span>
+        ${s.running
+          ? `<button class="btn sm" onclick="svcStop('${s.key}')">停止</button>`
+          : `<button class="btn sm primary" onclick="startLive('${s.key}')">启动</button>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+function startLive(key){
+  const el = document.getElementById('dry-'+key);
+  svcStart(key, el && el.checked);
+}
+
+/* ── 日志页 ── */
+function renderLogKeys(){
+  const sel = $('#logKey');
+  const opts = [['train','训练'], ...(STATE.services||[]).map(s=>[s.key, s.title])];
+  const cur = sel.value;
+  sel.innerHTML = opts.map(([k,t])=>`<option value="${k}">${esc(t)}</option>`).join('');
+  if(cur) sel.value = cur;
+  sel.onchange = ()=>loadLog(true);
+}
+async function loadLog(reset){
+  try{
+    const key = $('#logKey').value || 'train';
+    const r = await api(`/api/log?key=${encodeURIComponent(key)}&n=600`);
+    const box = $('#logBox');
+    box.textContent = (r.lines||[]).join('\n') || '（暂无输出）';
+    $('#logMeta').textContent = `${(r.lines||[]).length} 行 · ${STATE?STATE.now:''}`;
+    if($('#autoScroll').checked) box.scrollTop = box.scrollHeight;
+  }catch(e){}
+}
+
+/* ── 轮询 ── */
+refresh().then(renderLogKeys);
+setInterval(()=>{ if(!document.hidden) refresh(); }, 3000);
+setInterval(()=>{ if(TAB==='train') loadTrainLog(); }, 2500);
+setInterval(()=>{ if(TAB==='live') loadLiveLog(); }, 2500);
+setInterval(()=>{ if(TAB==='log') loadLog(); }, 2500);
+</script>
+</body>
+</html>
